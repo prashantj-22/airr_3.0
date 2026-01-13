@@ -1,0 +1,865 @@
+# AIRR Transcript Parser - Architecture
+
+Version: 1.0  
+Last Updated: January 13, 2026
+
+## Table of Contents
+
+1. [System Overview](#system-overview)
+2. [Architecture Diagram](#architecture-diagram)
+3. [Component Details](#component-details)
+4. [Data Flow](#data-flow)
+5. [Technology Stack](#technology-stack)
+6. [Database Schema](#database-schema)
+7. [Self-Learning Mechanism](#self-learning-mechanism)
+8. [Performance Considerations](#performance-considerations)
+9. [Scalability & Deployment](#scalability--deployment)
+10. [Security Architecture](#security-architecture)
+
+---
+
+## System Overview
+
+AIRR (AI-Powered Intelligent Record Reader) is a self-learning transcript extraction system that improves accuracy over time by storing successful parsing templates. The system uses Gemini 2.0 Flash Vision API for multimodal document understanding.
+
+### Key Features
+
+- **Template Matching**: Reuses learned extraction patterns for known universities (70%+ match threshold)
+- **Dynamic Analysis**: Falls back to deep layout analysis for unknown formats
+- **Zero-Shot Learning**: No training data required - learns from successful extractions
+- **Structured Output**: Enforces strict JSON schema compliance
+- **Incremental Improvement**: Each successful parse creates or reinforces templates
+
+### Design Principles
+
+1. **AI-First**: Leverage vision models instead of traditional OCR + NLP pipelines
+2. **Learn as You Go**: System improves with every processed document
+3. **Fail Gracefully**: Multiple fallback paths ensure robustness
+4. **Schema Driven**: Output format is predictable and validated
+5. **Stateless Processing**: Each request is independent (templates are shared state)
+
+---
+
+## Architecture Diagram
+
+### High-Level Architecture
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                          User Interface                          │
+│                    (Web Form / API Client)                       │
+└────────────────────────────┬─────────────────────────────────────┘
+                             │
+                             ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                         N8N Workflow                             │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │  1. Upload Trigger → 2. Image Prep → 3. Quick Detect      │  │
+│  └────────────────────────────────────────────────────────────┘  │
+└────────────┬──────────────────────────────────────┬──────────────┘
+             │                                      │
+             ▼                                      ▼
+   ┌─────────────────┐                   ┌──────────────────┐
+   │  Supabase DB    │                   │  Gemini 2.0 API  │
+   │  (Templates)    │◄──────────────────│  (Vision Model)  │
+   └─────────────────┘                   └──────────────────┘
+             │
+             ▼
+   ┌─────────────────┐
+   │  Template Match │
+   │   Score ≥ 70?   │
+   └────┬────────┬───┘
+        │        │
+    YES │        │ NO
+        │        │
+        ▼        ▼
+   ┌─────────┐  ┌──────────────────┐
+   │  Use    │  │  Deep Layout     │
+   │ Learned │  │  Analysis +      │
+   │Template │  │ Dynamic Prompt   │
+   └────┬────┘  └────────┬─────────┘
+        │                │
+        └────────┬───────┘
+                 ▼
+        ┌─────────────────┐
+        │  Gemini Extract │
+        │  (Structured)   │
+        └────────┬────────┘
+                 ▼
+        ┌─────────────────┐
+        │   Validation    │
+        │  (Schema Check) │
+        └────────┬────────┘
+                 ▼
+        ┌─────────────────┐
+        │ Save Template?  │
+        │  (If new & good)│
+        └────────┬────────┘
+                 ▼
+        ┌─────────────────┐
+        │  Return JSON    │
+        └─────────────────┘
+```
+
+### Detailed Workflow Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                           N8N WORKFLOW                              │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  ┌──────────────────┐                                              │
+│  │ Upload Transcript│  (Form Trigger)                              │
+│  │   - File Upload  │                                              │
+│  └────────┬─────────┘                                              │
+│           │                                                         │
+│           ▼                                                         │
+│  ┌──────────────────┐                                              │
+│  │ Prepare Image    │  (Code Node)                                 │
+│  │  - Base64 encode │                                              │
+│  │  - MIME type     │                                              │
+│  └────────┬─────────┘                                              │
+│           │                                                         │
+│           ▼                                                         │
+│  ┌──────────────────────────────────┐                              │
+│  │ Quick Detect University          │  (Gemini API)                │
+│  │  Prompt: "Identify university    │                              │
+│  │           and layout type"       │                              │
+│  │  Temp: 0.1 | Tokens: 500         │                              │
+│  └────────┬─────────────────────────┘                              │
+│           │                                                         │
+│           ▼                                                         │
+│  ┌──────────────────┐                                              │
+│  │ Parse Detection  │  (Code Node)                                 │
+│  │  - Extract JSON  │                                              │
+│  │  - Fallback vals │                                              │
+│  └────────┬─────────┘                                              │
+│           │                                                         │
+│           ▼                                                         │
+│  ┌──────────────────────────────────┐                              │
+│  │ Check Existing Template          │  (Supabase RPC)              │
+│  │  RPC: find_matching_template()   │                              │
+│  │  Input: university, layout_type  │                              │
+│  └────────┬─────────────────────────┘                              │
+│           │                                                         │
+│           ▼                                                         │
+│  ┌──────────────────┐                                              │
+│  │ Evaluate Match   │  (Code Node)                                 │
+│  │  - Score ≥ 70?   │                                              │
+│  │  - Set has_template flag         │                              │
+│  └────────┬─────────┘                                              │
+│           │                                                         │
+│      ┌────┴────┐                                                   │
+│      │   IF    │  (Conditional Split)                              │
+│      └─┬─────┬─┘                                                   │
+│        │     │                                                     │
+│    YES │     │ NO                                                  │
+│        │     │                                                     │
+│  ┌─────▼──┐  ┌──▼─────────────────────────┐                       │
+│  │Template│  │ Deep Layout Analysis       │  (Gemini API)         │
+│  │ Parse  │  │  Prompt: "Analyze structure│                       │
+│  │        │  │           in detail"       │                       │
+│  │        │  │  Temp: 0.2 | Tokens: 2000  │                       │
+│  └───┬────┘  └──────────┬─────────────────┘                       │
+│      │                  │                                          │
+│      │                  ▼                                          │
+│      │          ┌──────────────────┐                               │
+│      │          │ Build Dynamic    │  (Code Node)                  │
+│      │          │ Prompt           │                               │
+│      │          │  - Inject context│                               │
+│      │          │  - Custom rules  │                               │
+│      │          └────────┬─────────┘                               │
+│      │                   │                                         │
+│      │                   ▼                                         │
+│      │          ┌──────────────────────────┐                       │
+│      │          │ Parse With Dynamic       │  (Gemini API)         │
+│      │          │ Prompt                   │                       │
+│      │          │  Temp: 0.1 | Tokens: 4000│                       │
+│      │          └────────┬─────────────────┘                       │
+│      │                   │                                         │
+│      └───────┬───────────┘                                         │
+│              │                                                     │
+│              ▼                                                     │
+│  ┌──────────────────────────────────┐                              │
+│  │ Validate & Prepare Learning      │  (Code Node)                 │
+│  │  - Check required fields         │                              │
+│  │  - Count errors                  │                              │
+│  │  - Determine if eligible to save │                              │
+│  └────────┬─────────────────────────┘                              │
+│           │                                                         │
+│      ┌────┴────┐                                                   │
+│      │   IF    │  (Conditional Split)                              │
+│      └─┬─────┬─┘                                                   │
+│        │     │                                                     │
+│  SAVE  │     │ SKIP                                                │
+│        │     │                                                     │
+│  ┌─────▼──┐  ┌──▼─────────┐                                       │
+│  │ Save   │  │ Skip       │                                        │
+│  │Template│  │ Learning   │                                        │
+│  └───┬────┘  └──┬─────────┘                                       │
+│      │          │                                                  │
+│      └────┬─────┘                                                  │
+│           │                                                         │
+│           ▼                                                         │
+│  ┌──────────────────┐                                              │
+│  │ Prepare Final    │  (Code Node)                                 │
+│  │  - Format output │                                              │
+│  └────────┬─────────┘                                              │
+│           │                                                         │
+│           ▼                                                         │
+│  ┌──────────────────┐                                              │
+│  │ Return JSON      │  (Response)                                  │
+│  └──────────────────┘                                              │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Component Details
+
+### 1. N8N Workflow Engine
+
+**Role**: Orchestration and business logic
+
+**Responsibilities**:
+- HTTP request routing
+- Conditional branching
+- Data transformation
+- Error handling
+- Response formatting
+
+**Configuration**:
+```yaml
+Version: Latest (Docker)
+Execution Order: v1
+Webhook Mode: Production
+Timeout: 30 seconds per node
+```
+
+**Key Nodes**:
+- **Form Trigger**: File upload interface
+- **Code Nodes**: JavaScript data processing (9 nodes)
+- **HTTP Request Nodes**: External API calls (4 nodes)
+- **IF Nodes**: Conditional routing (2 nodes)
+
+---
+
+### 2. Gemini 2.0 Flash Vision API
+
+**Role**: Multimodal AI processing
+
+**Model**: `gemini-2.0-flash`
+
+**Capabilities**:
+- Vision understanding (OCR-free text extraction)
+- Structured output generation
+- Zero-shot classification
+- Layout analysis
+
+**Usage Patterns**:
+
+| Node | Purpose | Temperature | Max Tokens | Avg Latency |
+|------|---------|-------------|------------|-------------|
+| Quick Detect | University ID | 0.1 | 500 | 1-2s |
+| Layout Analysis | Structure detection | 0.2 | 2000 | 2-4s |
+| Template Parse | Extraction (learned) | 0.1 | 4000 | 3-5s |
+| Dynamic Parse | Extraction (new) | 0.1 | 4000 | 3-5s |
+
+**Error Handling**:
+- Retry on 429 (rate limit) with exponential backoff
+- Fallback to default values on parse errors
+- Log raw responses for debugging
+
+---
+
+### 3. Supabase Backend
+
+**Role**: Persistent storage and RPC functions
+
+**Database**: PostgreSQL 15
+
+**Components**:
+
+#### Tables
+
+**learned_templates**
+```sql
+- id: UUID (primary key)
+- university_name: TEXT
+- university_aliases: TEXT[]
+- layout_type: TEXT (enum: tabular, semester-block, etc.)
+- layout_fingerprint: JSONB
+- parsing_prompt: TEXT
+- output_schema: JSONB
+- times_used: INTEGER
+- success_count: INTEGER
+- created_at: TIMESTAMP
+- updated_at: TIMESTAMP
+```
+
+**Indexes**:
+```sql
+CREATE INDEX idx_university_name ON learned_templates(university_name);
+CREATE INDEX idx_layout_type ON learned_templates(layout_type);
+CREATE INDEX idx_times_used ON learned_templates(times_used DESC);
+```
+
+#### RPC Functions
+
+**find_matching_template(p_university, p_layout_type)**
+```sql
+Returns: Templates sorted by match_score DESC, times_used DESC
+Match Scoring:
+  - 100: Exact name + layout
+  - 80: Name only
+  - 70: Alias match
+  - 60: Layout only
+```
+
+---
+
+### 4. Client Layer
+
+**Interfaces**:
+1. **Web Form** - N8N form trigger (HTML)
+2. **REST API** - Webhook endpoint (JSON)
+3. **Future**: SDK libraries (Python, Node.js)
+
+---
+
+## Data Flow
+
+### Scenario 1: First-Time Processing (No Template)
+
+```
+1. User uploads MIT transcript (PNG)
+   ↓
+2. Image → Base64 encoding
+   ↓
+3. Gemini Quick Detect
+   Response: {"university": "MIT", "layout_type": "tabular"}
+   ↓
+4. Supabase template lookup
+   Result: [] (no match)
+   ↓
+5. Deep Layout Analysis (Gemini)
+   Response: {
+     "university_full_name": "Massachusetts Institute of Technology",
+     "grades": {"structure": "single-table", "columns": [...], "grade_format": "letter"},
+     "semesters": {"has_semester_gpa": true, "gpa_label": "SGPA"}
+   }
+   ↓
+6. Build Dynamic Prompt (Code)
+   Inject layout context into extraction template
+   ↓
+7. Parse With Dynamic Prompt (Gemini)
+   Response: Full JSON structure with extracted data
+   ↓
+8. Validation
+   Check: student_name exists, semesters array not empty
+   Result: VALID ✓
+   ↓
+9. Save Template to Supabase
+   Store: parsing_prompt, layout_fingerprint, university_name
+   ↓
+10. Return JSON to user
+
+Total Time: ~12 seconds
+Gemini Calls: 3
+```
+
+---
+
+### Scenario 2: Template Reuse (Existing Match)
+
+```
+1. User uploads second MIT transcript
+   ↓
+2. Image → Base64 encoding
+   ↓
+3. Gemini Quick Detect
+   Response: {"university": "MIT", "layout_type": "tabular"}
+   ↓
+4. Supabase template lookup
+   Result: [{"match_score": 100, "parsing_prompt": "...", ...}]
+   ↓
+5. Use Learned Template Path (skip layout analysis)
+   ↓
+6. Parse With Learned Template (Gemini)
+   Use stored parsing_prompt directly
+   Response: Full JSON structure
+   ↓
+7. Validation
+   Result: VALID ✓
+   ↓
+8. Skip saving (template already exists)
+   ↓
+9. Update times_used counter (optional)
+   ↓
+10. Return JSON to user
+
+Total Time: ~5 seconds (60% faster)
+Gemini Calls: 2 (33% fewer)
+```
+
+---
+
+## Technology Stack
+
+### Core Technologies
+
+| Component | Technology | Version | Purpose |
+|-----------|-----------|---------|---------|
+| Orchestration | N8N | Latest | Workflow automation |
+| AI Model | Gemini 2.0 Flash | v2.0 | Vision + text understanding |
+| Database | PostgreSQL (Supabase) | 15 | Template storage |
+| Backend API | Supabase REST API | Latest | Database access |
+| Runtime | Node.js | 18+ | N8N execution |
+| Container | Docker | Latest | Deployment |
+
+### Dependencies
+
+**N8N**:
+- `n8n-nodes-base`: Core nodes
+- `n8n-core`: Workflow engine
+
+**External APIs**:
+- Google Gemini API (generativelanguage.googleapis.com)
+- Supabase REST API
+
+---
+
+## Database Schema
+
+### Entity-Relationship Diagram
+
+```
+┌─────────────────────────────────────────┐
+│         learned_templates               │
+├─────────────────────────────────────────┤
+│ PK  id                UUID               │
+│     university_name   TEXT               │
+│     university_aliases TEXT[]            │
+│     layout_type       TEXT               │
+│     layout_fingerprint JSONB             │
+│     parsing_prompt    TEXT (LARGE)       │
+│     output_schema     JSONB              │
+│     times_used        INTEGER            │
+│     success_count     INTEGER            │
+│     created_at        TIMESTAMP          │
+│     updated_at        TIMESTAMP          │
+└─────────────────────────────────────────┘
+
+Indexes:
+- idx_university_name (B-tree)
+- idx_layout_type (B-tree)
+- idx_times_used (B-tree DESC)
+
+Constraints:
+- layout_type CHECK (IN 'tabular', 'semester-block', 'multi-column', 'single-page')
+```
+
+### Sample Data
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "university_name": "Massachusetts Institute of Technology",
+  "university_aliases": ["MIT", "M.I.T."],
+  "layout_type": "tabular",
+  "layout_fingerprint": {
+    "university_full_name": "MIT",
+    "header": {"position": "top-center", "student_fields": ["name", "id", "program"]},
+    "grades": {
+      "structure": "single-table",
+      "columns": ["Course Number", "Course Title", "Units", "Grade"],
+      "grade_format": "letter"
+    },
+    "semesters": {
+      "organization": "semester-blocks",
+      "has_semester_gpa": true,
+      "gpa_label": "Term GPA"
+    },
+    "summary": {
+      "has_cgpa": true,
+      "cgpa_label": "Cumulative GPA",
+      "other_fields": ["Total Units"]
+    }
+  },
+  "parsing_prompt": "You are a precise JSON extraction engine...",
+  "output_schema": {"studentinfo": "object", "collegeInfo": "object"},
+  "times_used": 42,
+  "success_count": 41,
+  "created_at": "2026-01-10T08:30:00Z",
+  "updated_at": "2026-01-13T18:30:00Z"
+}
+```
+
+---
+
+## Self-Learning Mechanism
+
+### Learning Lifecycle
+
+```
+┌──────────────┐
+│  New Format  │
+│  Detected    │
+└──────┬───────┘
+       │
+       ▼
+┌──────────────────┐
+│ Deep Analysis    │
+│ (Layout + Fields)│
+└──────┬───────────┘
+       │
+       ▼
+┌──────────────────┐
+│ Dynamic Prompt   │
+│ Generation       │
+└──────┬───────────┘
+       │
+       ▼
+┌──────────────────┐
+│ Extract Data     │
+│ (First Attempt)  │
+└──────┬───────────┘
+       │
+       ▼
+┌──────────────────┐      NO    ┌──────────────┐
+│ Validation       │────────────►│ Discard      │
+│ Success?         │             │ Don't Learn  │
+└──────┬───────────┘             └──────────────┘
+       │ YES
+       ▼
+┌──────────────────┐
+│ Save Template    │
+│ (prompt + meta)  │
+└──────┬───────────┘
+       │
+       ▼
+┌──────────────────┐
+│ Reuse on Next    │
+│ Similar Doc      │
+└──────────────────┘
+```
+
+### Learning Criteria
+
+**Save Template When**:
+1. Extraction succeeded (no critical errors)
+2. Not using an existing learned template (avoid duplication)
+3. Validation errors ≤ 1 (minor issues allowed)
+4. Required fields present: `student_name`, `semesters`
+
+**Template Matching Logic**:
+```javascript
+if (university_exact_match && layout_match) score = 100;
+else if (university_exact_match) score = 80;
+else if (university_in_aliases) score = 70;
+else if (layout_match) score = 60;
+else score = 0;
+
+use_template = (score >= 70);
+```
+
+### Template Evolution
+
+**Current Implementation**: Static templates (no updates)
+
+**Future Enhancements**:
+- Template versioning (v1, v2, etc.)
+- Automatic merging of similar templates
+- Confidence scoring per template
+- A/B testing of prompt variations
+- Feedback loop for user corrections
+
+---
+
+## Performance Considerations
+
+### Bottlenecks
+
+1. **Gemini API Latency**: 3-5 seconds per call
+   - Mitigation: Template reuse reduces calls by 33%
+
+2. **Base64 Encoding**: Large images (>5MB) slow processing
+   - Mitigation: Client-side compression recommended
+
+3. **Supabase RPC**: ~200ms query time
+   - Mitigation: Index optimization (already implemented)
+
+### Optimization Strategies
+
+**Current**:
+- Indexed database queries
+- Low temperature (0.1) for faster inference
+- Conditional branching (skip unnecessary steps)
+
+**Planned**:
+- Template caching in N8N memory
+- Parallel Gemini calls where possible
+- Image resizing before Base64 encoding
+- Connection pooling for Supabase
+
+### Resource Usage
+
+| Component | CPU | Memory | Storage |
+|-----------|-----|--------|---------|
+| N8N (idle) | <5% | 200MB | 500MB |
+| N8N (processing) | 15-30% | 400MB | - |
+| Supabase (free tier) | N/A | N/A | 500MB |
+| Total | Low | <500MB | <1GB |
+
+---
+
+## Scalability & Deployment
+
+### Horizontal Scaling
+
+**N8N**:
+- Run multiple N8N instances behind load balancer
+- Share webhook endpoints via reverse proxy
+- Use external database for workflow state (PostgreSQL)
+
+**Supabase**:
+- Upgrade to Pro plan for connection pooling
+- Use read replicas for template lookups
+
+**Gemini API**:
+- Distribute requests across multiple API keys
+- Implement queue system for rate limit management
+
+### Deployment Architecture (Production)
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                     Cloud Load Balancer                 │
+│                  (HTTPS, SSL Termination)               │
+└────────────┬────────────────────────────────────────────┘
+             │
+             ▼
+┌────────────────────────────────────────────────────────┐
+│                  Nginx Reverse Proxy                   │
+│            (Rate Limiting, Caching, CORS)              │
+└───────┬──────────────────────────────┬─────────────────┘
+        │                              │
+        ▼                              ▼
+┌───────────────┐              ┌───────────────┐
+│  N8N Instance │              │  N8N Instance │
+│   (Container) │              │   (Container) │
+└───────┬───────┘              └───────┬───────┘
+        │                              │
+        └──────────────┬───────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────┐
+        │     Supabase (Managed)       │
+        │  - PostgreSQL (primary)      │
+        │  - Read replicas (optional)  │
+        └──────────────────────────────┘
+```
+
+### Infrastructure as Code
+
+**Docker Compose (Development)**:
+```yaml
+version: '3.8'
+services:
+  n8n:
+    image: n8nio/n8n:latest
+    environment:
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - WEBHOOK_URL=https://your-domain.com
+    volumes:
+      - n8n_data:/home/node/.n8n
+    ports:
+      - "5678:5678"
+```
+
+**Kubernetes (Production)**:
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: n8n-deployment
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: n8n
+  template:
+    spec:
+      containers:
+      - name: n8n
+        image: n8nio/n8n:latest
+        env:
+        - name: GEMINI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: api-secrets
+              key: gemini-key
+```
+
+---
+
+## Security Architecture
+
+### Threat Model
+
+| Threat | Mitigation |
+|--------|-----------|
+| API key exposure | Environment variables, secret management |
+| Malicious file uploads | File type validation, size limits |
+| Injection attacks | Parameterized queries, input sanitization |
+| DDoS | Rate limiting, load balancing |
+| Data leakage | HTTPS, encrypted storage |
+
+### Security Layers
+
+**1. Transport Security**
+- HTTPS/TLS 1.3 required
+- Certificate pinning (optional)
+
+**2. Authentication & Authorization**
+- N8N Basic Auth or API keys
+- Supabase Row-Level Security (RLS)
+- Service role key only server-side
+
+**3. Input Validation**
+```javascript
+// File validation
+const allowedTypes = ['image/png', 'image/jpeg', 'image/webp'];
+const maxSize = 10 * 1024 * 1024; // 10MB
+
+if (!allowedTypes.includes(file.mimetype)) {
+  throw new Error('Invalid file type');
+}
+if (file.size > maxSize) {
+  throw new Error('File too large');
+}
+```
+
+**4. Output Sanitization**
+- JSON schema validation
+- HTML escaping in responses
+- No PII logging
+
+**5. Secrets Management**
+```bash
+# .env (never commit)
+GEMINI_API_KEY=...
+SUPABASE_SERVICE_KEY=...
+
+# Use secret stores in production
+- AWS Secrets Manager
+- HashiCorp Vault
+- Kubernetes Secrets
+```
+
+### Compliance Considerations
+
+**GDPR/CCPA**:
+- Transcript images not permanently stored (processed in memory)
+- Templates contain no PII
+- User can request template deletion
+
+**Data Retention**:
+- Workflow execution logs: 7 days (N8N default)
+- Templates: Indefinite (can be pruned manually)
+
+---
+
+## Monitoring & Observability
+
+### Metrics to Track
+
+**Application Metrics**:
+- Requests per minute
+- Average processing time
+- Template match rate (%)
+- Validation success rate (%)
+
+**Infrastructure Metrics**:
+- N8N container CPU/memory
+- Supabase query latency
+- Gemini API error rate
+
+**Business Metrics**:
+- Unique universities processed
+- Total templates learned
+- Cost per extraction (Gemini API usage)
+
+### Logging Strategy
+
+**Structured Logging**:
+```json
+{
+  "timestamp": "2026-01-13T18:30:00Z",
+  "level": "INFO",
+  "workflow_execution_id": "abc123",
+  "node": "Quick Detect University",
+  "university_detected": "MIT",
+  "layout_type": "tabular",
+  "processing_time_ms": 1250
+}
+```
+
+**Log Levels**:
+- ERROR: Gemini API failures, validation errors
+- WARN: Template match < 70%, missing optional fields
+- INFO: Successful extractions, template saves
+- DEBUG: Raw Gemini responses, intermediate data
+
+---
+
+## Future Enhancements
+
+### Planned Features
+
+1. **Multi-Page Support**
+   - PDF splitting
+   - Page-by-page processing
+   - Aggregation logic
+
+2. **Confidence Scoring**
+   - Per-field confidence levels
+   - Human-in-the-loop for low confidence
+
+3. **Template Marketplace**
+   - Share templates across instances
+   - Community contributions
+
+4. **Batch Processing**
+   - Upload multiple transcripts
+   - Parallel processing queue
+
+5. **Real-time Updates**
+   - WebSocket progress notifications
+   - Streaming responses
+
+---
+
+## References
+
+- [N8N Documentation](https://docs.n8n.io)
+- [Gemini API Guide](https://ai.google.dev/gemini-api)
+- [Supabase Docs](https://supabase.com/docs)
+- [AIRR GitHub Repository](https://github.com/yourusername/airr-transcript-parser)
+
+---
+
+## Changelog
+
+### v1.0 (2026-01-13)
+- Initial architecture design
+- Self-learning template system
+- Gemini 2.0 Flash integration
+- Supabase backend
+- N8N workflow implementation
+
+---
+
+*Architecture maintained by: AIRR Development Team*  
+*Last reviewed: January 13, 2026*

@@ -1,0 +1,789 @@
+{
+  "name": "AIRR Transcript Parser - Gemini API",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "airr-upload",
+        "formTitle": "AIRR Transcript Parser",
+        "formDescription": "Upload a student transcript image",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Transcript Image",
+              "fieldType": "file",
+              "acceptFileTypes": ".png,.jpg,.jpeg,.webp",
+              "requiredField": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "086187d6-757b-4183-a254-877d52c86a1b",
+      "name": "Upload Transcript",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.1,
+      "position": [
+        -12096,
+        3184
+      ],
+      "webhookId": "airr-upload"
+    },
+    {
+      "parameters": {
+        "jsCode": "const inputData = $input.first();\n\nlet binaryData = null;\nif (inputData.binary) {\n  const keys = Object.keys(inputData.binary);\n  if (keys.length > 0) {\n    binaryData = inputData.binary[keys[0]];\n  }\n}\n\nif (!binaryData) throw new Error('No file uploaded');\n\nlet base64 = binaryData.data;\nconst mimeType = binaryData.mimeType || 'image/png';\n\nif (base64 === 'filesystem-v2' || !base64 || base64.length < 100) {\n  const buffer = await this.helpers.getBinaryDataBuffer(0, Object.keys(inputData.binary)[0]);\n  base64 = buffer.toString('base64');\n}\n\nif (base64.includes(',')) {\n  base64 = base64.split(',')[1];\n}\n\nreturn [{ json: { image_base64_raw: base64, mimeType: mimeType } }];"
+      },
+      "id": "4c930e04-adbe-48f3-b9da-c5203d0aaef1",
+      "name": "Prepare Image Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -11856,
+        3184
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=<REDACTED>",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"contents\": [{\n    \"parts\": [\n      {\n        \"inlineData\": {\n          \"mimeType\": \"{{ $json.mimeType }}\",\n          \"data\": \"{{ $json.image_base64_raw }}\"\n        }\n      },\n      {\n        \"text\": \"Identify this student transcript:\\n1. University name (exact)\\n2. Layout type: 'tabular' | 'semester-block' | 'multi-column' | 'single-page'\\n3. Country\\n\\nReturn ONLY JSON, no markdown:\\n{\\\"university\\\": \\\"name\\\", \\\"layout_type\\\": \\\"type\\\", \\\"country\\\": \\\"country or null\\\"}\"\n      }\n    ]\n  }],\n  \"generationConfig\": {\n    \"temperature\": 0.1,\n    \"maxOutputTokens\": 500\n  }\n}",
+        "options": {}
+      },
+      "id": "8deb21e9-1812-4a24-90b2-1ad92357f74d",
+      "name": "Quick Detect University",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -11600,
+        3184
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "XWnZqNeaG9kAbBro",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nconst text = response.candidates?.[0]?.content?.parts?.[0]?.text || '{}';\n\nlet parsed;\ntry {\n  let jsonStr = text;\n  const jsonMatch = text.match(/```json\\n?([\\s\\S]*?)\\n?```/) || text.match(/```\\n?([\\s\\S]*?)\\n?```/);\n  if (jsonMatch) jsonStr = jsonMatch[1];\n  parsed = JSON.parse(jsonStr.trim());\n} catch (e) {\n  parsed = { university: 'unknown', layout_type: 'tabular', country: null };\n}\n\nconst imageData = $('Prepare Image Data').first().json;\n\nreturn [{\n  json: {\n    detected: parsed,\n    image_base64_raw: imageData.image_base64_raw,\n    mimeType: imageData.mimeType\n  }\n}];"
+      },
+      "id": "8feb3903-9301-4a8e-8b37-a7585fda1c4d",
+      "name": "Parse Quick Detection",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -11360,
+        3184
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://dluqgbrwbddjrrqqibrm.supabase.co/rest/v1/rpc/find_matching_template",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "" },
+            {
+              "name": "Authorization",
+              "value": "Bearer <REDACTED>"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"p_university\": {{ JSON.stringify($json.detected.university) }}, \"p_layout_type\": {{ JSON.stringify($json.detected.layout_type) }}}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          },
+          "timeout": 10000
+        }
+      },
+      "id": "e1e1d2e7-99d2-4efe-8eba-b7aeafa452cd",
+      "name": "Check Existing Template",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -11104,
+        3184
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "XWnZqNeaG9kAbBro",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const inputItems = $input.all();\nconst prevData = $('Parse Quick Detection').first().json;\n\n// Handle empty input or no results\nlet templates = [];\nlet result = null;\n\nif (inputItems.length > 0 && inputItems[0].json) {\n  result = inputItems[0].json;\n  \n  if (Array.isArray(result)) {\n    templates = result;\n  } else if (result && typeof result === 'object' && !result.error) {\n    templates = [result];\n  }\n}\n\n// Check for good match (score >= 70)\nconst goodMatch = templates.length > 0 && \n                  templates[0].match_score !== undefined && \n                  templates[0].match_score >= 70;\n\nreturn [{\n  json: {\n    has_template: goodMatch,\n    template: goodMatch ? templates[0] : null,\n    detected: prevData.detected,\n    image_base64_raw: prevData.image_base64_raw,\n    mimeType: prevData.mimeType\n  }\n}];\n"
+      },
+      "id": "777d712d-3f40-462a-950d-53eb5410725b",
+      "name": "Evaluate Template Match",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -10848,
+        3184
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "has-template",
+              "leftValue": "={{ $json.has_template }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "f43a60e2-5b72-435c-9021-0d3254cffd2b",
+      "name": "Has Learned Template?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -10608,
+        3184
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=<REDACTED>",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"contents\": [{\n    \"parts\": [\n      {\n        \"inlineData\": {\n          \"mimeType\": \"{{ $json.mimeType }}\",\n          \"data\": \"{{ $json.image_base64_raw }}\"\n        }\n      },\n      {\n        \"text\": \"Analyze this transcript image IN DETAIL:\\n\\n1. HEADER: University name/logo position, student info fields\\n2. GRADES: Table structure, column headers, grade format (letter/number/percentage)\\n3. SEMESTERS: How separated, SGPA per semester?\\n4. SUMMARY: CGPA location, other fields\\n\\nReturn JSON:\\n{\\n  \\\"university_full_name\\\": \\\"\\\",\\n  \\\"header\\\": {\\\"position\\\": \\\"\\\", \\\"student_fields\\\": []},\\n  \\\"grades\\\": {\\\"structure\\\": \\\"single-table|multi-table|semester-blocks\\\", \\\"columns\\\": [], \\\"grade_format\\\": \\\"letter|10-point|percentage\\\"},\\n  \\\"semesters\\\": {\\\"organization\\\": \\\"\\\", \\\"has_semester_gpa\\\": true, \\\"gpa_label\\\": \\\"SGPA\\\"},\\n  \\\"summary\\\": {\\\"has_cgpa\\\": true, \\\"cgpa_label\\\": \\\"CGPA\\\", \\\"other_fields\\\": []},\\n  \\\"extractable_fields\\\": []\\n}\"\n      }\n    ]\n  }],\n  \"generationConfig\": {\n    \"temperature\": 0.2,\n    \"maxOutputTokens\": 2000\n  }\n}",
+        "options": {}
+      },
+      "id": "b147f759-b93d-4c88-83a0-fec7c3e7c60b",
+      "name": "Deep Layout Analysis",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -10352,
+        3328
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "XWnZqNeaG9kAbBro",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nconst text = response.candidates?.[0]?.content?.parts?.[0]?.text || '{}';\n\nlet analysis;\ntry {\n  let jsonStr = text;\n  const jsonMatch = text.match(/```json\\n?([\\s\\S]*?)\\n?```/) || text.match(/```\\n?([\\s\\S]*?)\\n?```/);\n  if (jsonMatch) jsonStr = jsonMatch[1];\n  analysis = JSON.parse(jsonStr.trim());\n} catch (e) {\n  analysis = { error: 'Failed to parse', raw: text };\n}\n\nconst prevData = $('Evaluate Template Match').first().json;\n\n// Build context from layout analysis\nlet layoutContext = '';\nif (!analysis.error) {\n  layoutContext = `\n\nLAYOUT ANALYSIS CONTEXT:\n- University: ${analysis.university_full_name || prevData.detected.university}\n- Document Structure: ${analysis.grades?.structure || 'tabular'}\n- Grade Format: ${analysis.grades?.grade_format || 'letter grades'}\n- Available Columns: ${(analysis.grades?.columns || []).join(', ') || 'course code, name, credits, grade'}\n- Has Semester GPA: ${analysis.semesters?.has_semester_gpa ? 'Yes' : 'No'}\n- Has Overall CGPA: ${analysis.summary?.has_cgpa ? 'Yes' : 'No'}\n`;\n}\n\nconst prompt = `You are a precise JSON extraction engine. Extract data from this ${analysis.university_full_name || prevData.detected.university} transcript image.${layoutContext}\n\nOUTPUT REQUIREMENTS:\n1. Return ONLY raw JSON - no markdown, no code blocks, no explanations\n2. Do NOT wrap in \\`\\`\\`json or \\`\\`\\` tags\n3. Start with { and end with }\n4. Use exactly this structure:\n\n{\n  \"studentinfo\": {\n    \"SPRIDEN ID\": {\"value\": \"\", \"label\": \"SPRIDEN ID\", \"rule\": \"mixed\", \"length\": 25, \"previewJson\": true},\n    \"SPRIDEN_PIDM\": {\"value\": \"\", \"label\": \"SPRIDEN_PIDM\", \"rule\": \"mixed\", \"length\": 25, \"previewJson\": true},\n    \"STUDENT NAME\": {\"label\": \"STUDENT NAME\", \"value\": \"\", \"length\": 25, \"rule\": \"mixed\"},\n    \"MAILING ADDRESS\": {\"label\": \"MAILING ADDRESS\", \"value\": \"\", \"length\": 25, \"rule\": \"mixed\"},\n    \"Start Date\": {\"value\": \"\", \"label\": \"Start Date\", \"rule\": \"mixed\", \"length\": 20},\n    \"End Date\": {\"value\": \"\", \"label\": \"End Date\", \"rule\": \"mixed\", \"length\": 20},\n    \"major\": {\"value\": \"\", \"label\": \"Major\", \"rule\": \"mixed\", \"length\": 40}\n  },\n  \"collegeInfo\": {\n    \"INSTITUTION TYPE\": {\"value\": \"\", \"label\": \"INSTITUTION TYPE\", \"rule\": \"mixed\", \"length\": 25, \"previewJson\": true},\n    \"INSTITUTION NAME\": {\"label\": \"INSTITUTION NAME\", \"value\": \"${analysis.university_full_name || prevData.detected.university}\", \"length\": 25, \"rule\": \"mixed\", \"previewJson\": true},\n    \"ADDRESS\": {\"label\": \"ADDRESS\", \"value\": \"\", \"length\": 25, \"rule\": \"mixed\"},\n    \"CITY\": {\"label\": \"CITY\", \"value\": \"\", \"length\": 25, \"rule\": \"mixed\"},\n    \"PHONE\": {\"label\": \"PHONE\", \"value\": \"\", \"length\": 25, \"rule\": \"mixed\"},\n    \"STATE\": {\"label\": \"STATE\", \"value\": \"\", \"length\": 25, \"rule\": \"mixed\"},\n    \"ZIP CODE\": {\"label\": \"ZIP CODE\", \"value\": \"\", \"length\": 25, \"rule\": \"mixed\"},\n    \"COLLEGE CODE\": {\"value\": \"\", \"label\": \"COLLEGE CODE\", \"rule\": \"mixed\", \"length\": 25, \"previewJson\": true}\n  },\n  \"gpaSummary\": {\n    \"TOTAL TRANSFERABLE CREDITS\": {\"value\": \"\", \"label\": \"TOTAL TRANSFERABLE CREDITS\", \"rule\": \"mixed\", \"length\": 25, \"previewJson\": true},\n    \"TOTAL CTX CREDITS\": {\"value\": \"\", \"label\": \"TOTAL CTX CREDITS\", \"rule\": \"mixed\", \"length\": 25, \"previewJson\": true},\n    \"Total Credit Earned\": {\"value\": 0, \"label\": \"Total Credit Earned\", \"rule\": \"mixed\", \"length\": 25, \"previewJson\": true},\n    \"calculated_col_gpa\": {\"label\": \"calculated_col_gpa\", \"value\": \"0.000\", \"length\": 25, \"rule\": \"mixed\", \"previewJson\": true}\n  },\n  \"totalSummary\": [{\n    \"overall_earned_hours\": {\"label\": \"overall_earned_hours\", \"value\": \"\", \"length\": 25, \"rule\": \"mixed\"},\n    \"overall_gpa\": {\"label\": \"overall_gpa\", \"value\": \"\", \"length\": 25, \"rule\": \"mixed\"},\n    \"total_institution_earned_hours\": {\"label\": \"total_institution_earned_hours\", \"value\": \"\", \"length\": 25, \"rule\": \"mixed\"},\n    \"total_transfer_earned_hours\": {\"label\": \"total_transfer_earned_hours\", \"value\": \"\", \"length\": 25, \"rule\": \"mixed\"},\n    \"total_credit_earned\": {\"label\": \"total_credit_earned\", \"value\": 0, \"length\": 25, \"rule\": \"mixed\"},\n    \"total_qualilty_number\": {\"label\": \"total_quality_number\", \"value\": 0, \"length\": 25, \"rule\": \"mixed\"}\n  }],\n  \"academicrecord\": [\n    {\n      \"termDetails\": [{\"monthYear\": {\"value\": \"\", \"label\": \"monthYear\", \"rule\": \"mixed\", \"length\": 25, \"index\": 0}}],\n      \"courseDetails\": [\n        {\n          \"course_id\": {\"value\": \"\", \"label\": \"course_id\", \"rule\": \"mixed\", \"length\": 25, \"index\": 0},\n          \"course_name\": {\"value\": \"\", \"label\": \"course_name\", \"rule\": \"mixed\", \"length\": 25, \"index\": 1},\n          \"credits_earned\": {\"value\": \"\", \"label\": \"credits_earned\", \"rule\": \"mixed\", \"length\": 25, \"index\": 2, \"key\": \"credits_attempted\"},\n          \"grades\": {\"value\": \"\", \"label\": \"grades\", \"rule\": \"mixed\", \"length\": 25, \"index\": 3},\n          \"points\": {\"index\": 4, \"value\": \"\", \"label\": \"points\"},\n          \"year_term\": {\"index\": 5, \"value\": \"\", \"label\": \"year_term\"}\n        }\n      ]\n    }\n  ],\n  \"academicrecordLLM\": [],\n  \"pagewise_academic_records\": \"\",\n  \"errors\": [],\n  \"transformed\": true\n}\n\nEXTRACTION RULES (Based on Layout Analysis):\n- Student name → studentinfo.STUDENT NAME.value\n- University → collegeInfo.INSTITUTION NAME.value (use \"${analysis.university_full_name || prevData.detected.university}\")\n- Major/Program → studentinfo.major.value  \n- Each term/semester → new object in academicrecord array\n- Term format → academicrecord[].termDetails[].monthYear.value (e.g., \"Fall 2022\")\n- Course extraction follows detected columns: ${(analysis.grades?.columns || []).join(', ') || 'standard format'}\n- Grade format: ${analysis.grades?.grade_format || 'letter grades (A, B, C, etc.)'}\n- Each course → object in courseDetails with: course_id, course_name, credits_earned, grades, points, year_term\n- GPA mapping: ${analysis.semesters?.gpa_label || 'SGPA'} → per-term GPA, ${analysis.summary?.cgpa_label || 'CGPA'} → overall GPA\n- totalSummary[].overall_gpa.value gets the ${analysis.summary?.cgpa_label || 'CGPA'} value\n- Empty strings for missing text, 0 for missing numbers\n- Keep ALL metadata fields (label, rule, length, index, previewJson) unchanged\n- Extract ALL visible semesters/terms from the transcript\n\nCRITICAL: Your response must start with { and end with }. No other text before or after.`;\n\nreturn [{\n  json: {\n    layout_analysis: analysis,\n    dynamic_prompt: prompt,\n    detected: prevData.detected,\n    image_base64_raw: prevData.image_base64_raw,\n    mimeType: prevData.mimeType\n  }\n}];\n"
+      },
+      "id": "280fdbdf-c0a8-423b-aae8-52fe79e7785e",
+      "name": "Build Dynamic Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -10096,
+        3328
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const prevData = $('Evaluate Template Match').first().json;\n\nreturn [{\n  json: {\n    template: prevData.template,\n    detected: prevData.detected,\n    image_base64_raw: prevData.image_base64_raw,\n    mimeType: prevData.mimeType\n  }\n}];"
+      },
+      "id": "d7cddd36-8df6-453b-b6dc-24eaa2a5ac59",
+      "name": "Prepare Template Parse",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -10352,
+        3024
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=<REDACTED>",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "=={\n  \"contents\": [{\n    \"parts\": [\n      {\n        \"inlineData\": {\n          \"mimeType\": \"{{ $json.mimeType }}\",\n          \"data\": \"{{ $json.image_base64_raw }}\"\n        }\n      },\n      {\n        \"text\": \"={{ $json.template.parsing_prompt + '\\n\\nReturn ONLY valid JSON.' }}\"\n      }\n    ]\n  }],\n  \"generationConfig\": {\n    \"temperature\": 0.1,\n    \"maxOutputTokens\": 4000\n  }\n}\n",
+        "options": {}
+      },
+      "id": "707a9754-7ce4-4c2f-afe4-6472f3e2e66b",
+      "name": "Parse With Learned Template",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -10096,
+        3024
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "XWnZqNeaG9kAbBro",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nconst text = response.candidates?.[0]?.content?.parts?.[0]?.text || '{}';\n\nlet parsed;\ntry {\n  let jsonStr = text;\n  const jsonMatch = text.match(/```json\\n?([\\s\\S]*?)\\n?```/) || text.match(/```\\n?([\\s\\S]*?)\\n?```/);\n  if (jsonMatch) jsonStr = jsonMatch[1];\n  parsed = JSON.parse(jsonStr.trim());\n} catch (e) {\n  parsed = { _error: e.message, _raw: text };\n}\n\nconst prevData = $('Prepare Template Parse').first().json;\n\nreturn [{\n  json: {\n    parsed_data: parsed,\n    detected: prevData.detected,\n    template_id: prevData.template?.id,\n    used_learned_template: true,\n    prompt_used: prevData.template?.parsing_prompt\n  }\n}];"
+      },
+      "id": "20722001-152a-4aa6-9253-428230cc7d6c",
+      "name": "Format Template Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -9856,
+        3024
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=AIzaSy....",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "=={\n  \"contents\": [{\n    \"parts\": [\n      {\n        \"inlineData\": {\n          \"mimeType\": \"{{ $json.mimeType }}\",\n          \"data\": \"{{ $json.image_base64_raw }}\"\n        }\n      },\n      {\n        \"text\": \"={{ $json.dynamic_prompt }}\"\n      }\n    ]\n  }],\n  \"generationConfig\": {\n    \"temperature\": 0.1,\n    \"maxOutputTokens\": 4000\n  }\n}\n",
+        "options": {}
+      },
+      "id": "7ac6eaeb-5b0e-4c27-9c18-05ea2723c06d",
+      "name": "Parse With Dynamic Prompt",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -9856,
+        3328
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "XWnZqNeaG9kAbBro",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nconst text = response.candidates?.[0]?.content?.parts?.[0]?.text || '{}';\n\nlet parsed;\ntry {\n  let jsonStr = text;\n  const jsonMatch = text.match(/```json\\n?([\\s\\S]*?)\\n?```/) || text.match(/```\\n?([\\s\\S]*?)\\n?```/);\n  if (jsonMatch) jsonStr = jsonMatch[1];\n  parsed = JSON.parse(jsonStr.trim());\n} catch (e) {\n  parsed = { _error: e.message, _raw: text };\n}\n\nconst prevData = $('Build Dynamic Prompt').first().json;\n\nreturn [{\n  json: {\n    parsed_data: parsed,\n    detected: prevData.detected,\n    layout_analysis: prevData.layout_analysis,\n    used_learned_template: false,\n    prompt_used: prevData.dynamic_prompt\n  }\n}];"
+      },
+      "id": "161a6e7f-6ed1-43fa-bec7-e4dea32103bd",
+      "name": "Format Dynamic Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -9600,
+        3328
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\n\nlet isValid = true;\nlet errors = [];\nconst parsed = data.parsed_data;\n\nif (parsed._error) {\n  isValid = false;\n  errors.push(`JSON parse failed: ${parsed._error}`);\n}\n\nif (!parsed.student_name && !parsed._error) errors.push('Missing: student_name');\nif (!parsed.student_id && !parsed.roll_number && !parsed.sr_number) errors.push('Missing: student identifier');\nif (!parsed.semesters || !Array.isArray(parsed.semesters) || parsed.semesters.length === 0) errors.push('Missing: semesters');\n\nif (errors.length > 2) isValid = false;\n\nconst eligibleForLearning = isValid && !data.used_learned_template && errors.length <= 1;\n\nreturn [{\n  json: {\n    success: isValid,\n    data: parsed,\n    validation: { is_valid: isValid, errors: errors },\n    metadata: {\n      detected: data.detected,\n      layout_analysis: data.layout_analysis || null,\n      used_learned_template: data.used_learned_template,\n      template_id: data.template_id || null\n    },\n    learning: {\n      eligible: eligibleForLearning,\n      prompt_to_save: eligibleForLearning ? data.prompt_used : null\n    }\n  }\n}];\n"
+      },
+      "id": "e46317f9-935d-4cf6-ba9b-fd8d403cf876",
+      "name": "Validate & Prepare Learning",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -9360,
+        3184
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "eligible-learning",
+              "leftValue": "={{ $json.learning.eligible }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "0f2bb96d-14ad-4f33-a796-ab242669cf15",
+      "name": "Eligible for Learning?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -9104,
+        3184
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const prevData = $input.first().json;\n\nreturn [{\n  json: {\n    ...prevData,\n    supabase_payload: {\n      university_name: prevData.metadata.detected.university,\n      university_aliases: [],\n      layout_type: prevData.metadata.detected.layout_type,\n      layout_fingerprint: prevData.metadata.layout_analysis || {},\n      parsing_prompt: prevData.learning.prompt_to_save,\n      output_schema: Object.keys(prevData.data).reduce((acc, key) => { acc[key] = typeof prevData.data[key]; return acc; }, {}),\n      times_used: 1,\n      success_count: 1\n    }\n  }\n}];"
+      },
+      "id": "253eb6d5-44be-463d-8bc5-96e27facf308",
+      "name": "Prepare Save Template",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -8848,
+        3088
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://dluqgbrwbddjrrqqibrm.supabase.co/rest/v1/learned_templates",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "<REDACTED>"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer <REDACTED>"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Prefer",
+              "value": "return=representation"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.supabase_payload) }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "45ee5e33-fd55-455d-8505-7e94129a2867",
+      "name": "Save Learned Template",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -8608,
+        3088
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "XWnZqNeaG9kAbBro",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const prevData = $('Prepare Save Template').first().json;\nconst saveResult = $input.first().json;\n\nconst saved = saveResult && !saveResult.error && (saveResult.id || (Array.isArray(saveResult) && saveResult[0]?.id));\n\nreturn [{\n  json: {\n    success: prevData.success,\n    data: prevData.data,\n    validation: prevData.validation,\n    metadata: prevData.metadata,\n    learning: { ...prevData.learning, was_saved: saved, new_template_id: saved ? (saveResult.id || saveResult[0]?.id) : null }\n  }\n}];"
+      },
+      "id": "9a133007-b996-4f87-a030-42c9c9fea140",
+      "name": "After Save Template",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -8352,
+        3088
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const prevData = $('Validate & Prepare Learning').first().json;\n\nreturn [{\n  json: {\n    success: prevData.success,\n    data: prevData.data,\n    validation: prevData.validation,\n    metadata: prevData.metadata,\n    learning: { ...prevData.learning, was_saved: false, reason: prevData.metadata.used_learned_template ? 'used_existing' : 'validation_failed' }\n  }\n}];"
+      },
+      "id": "230e440b-900e-4ebc-a5e3-892447f8e7cf",
+      "name": "Skip Learning",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -8848,
+        3280
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nreturn [{ json: data }];"
+      },
+      "id": "bc8b742a-cf60-47da-b1f8-ebc091e78026",
+      "name": "Prepare Final",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -8096,
+        3184
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\n\n// Return only the parsed data JSON\nreturn [{\n  json: data.data\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -7888,
+        3184
+      ],
+      "id": "65ba2e21-8505-40d2-b3ab-b7e60797711c",
+      "name": "Code in JavaScript"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Upload Transcript": {
+      "main": [
+        [
+          {
+            "node": "Prepare Image Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Image Data": {
+      "main": [
+        [
+          {
+            "node": "Quick Detect University",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Quick Detect University": {
+      "main": [
+        [
+          {
+            "node": "Parse Quick Detection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Quick Detection": {
+      "main": [
+        [
+          {
+            "node": "Check Existing Template",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Existing Template": {
+      "main": [
+        [
+          {
+            "node": "Evaluate Template Match",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluate Template Match": {
+      "main": [
+        [
+          {
+            "node": "Has Learned Template?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Learned Template?": {
+      "main": [
+        [
+          {
+            "node": "Prepare Template Parse",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Deep Layout Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Template Parse": {
+      "main": [
+        [
+          {
+            "node": "Parse With Learned Template",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse With Learned Template": {
+      "main": [
+        [
+          {
+            "node": "Format Template Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Template Result": {
+      "main": [
+        [
+          {
+            "node": "Validate & Prepare Learning",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Deep Layout Analysis": {
+      "main": [
+        [
+          {
+            "node": "Build Dynamic Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Dynamic Prompt": {
+      "main": [
+        [
+          {
+            "node": "Parse With Dynamic Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse With Dynamic Prompt": {
+      "main": [
+        [
+          {
+            "node": "Format Dynamic Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Dynamic Result": {
+      "main": [
+        [
+          {
+            "node": "Validate & Prepare Learning",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate & Prepare Learning": {
+      "main": [
+        [
+          {
+            "node": "Eligible for Learning?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Eligible for Learning?": {
+      "main": [
+        [
+          {
+            "node": "Prepare Save Template",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Skip Learning",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Save Template": {
+      "main": [
+        [
+          {
+            "node": "Save Learned Template",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Learned Template": {
+      "main": [
+        [
+          {
+            "node": "After Save Template",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "After Save Template": {
+      "main": [
+        [
+          {
+            "node": "Prepare Final",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Skip Learning": {
+      "main": [
+        [
+          {
+            "node": "Prepare Final",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Final": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false,
+    "timeSavedMode": "fixed",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "versionId": "0098d206-1372-4d80-bc76-75544b7370a4",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "e53b05dfa1100541416649d7ae94ee9c533190f9c2b9f685d263f02a6090c80f"
+  },
+  "id": "2Fb_vpTOs26G_EmJKAax7",
+  "tags": [
+    {
+      "updatedAt": "2026-01-12T10:26:12.388Z",
+      "createdAt": "2026-01-12T10:26:12.388Z",
+      "id": "4xMk0eFYHnBNnZGg",
+      "name": "AIRR"
+    },
+    {
+      "updatedAt": "2026-01-12T10:26:12.363Z",
+      "createdAt": "2026-01-12T10:26:12.363Z",
+      "id": "95on9mFuHSz43nn3",
+      "name": "Document-AI"
+    },
+    {
+      "updatedAt": "2026-01-12T10:43:49.894Z",
+      "createdAt": "2026-01-12T10:43:49.894Z",
+      "id": "krkgMmOjd4YO5FKl",
+      "name": "Learn-as-you-go"
+    }
+  ]
+}
